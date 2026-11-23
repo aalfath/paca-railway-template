@@ -1,0 +1,84 @@
+# Paca gateway for Railway. Based on upstream deploy/caddy/Caddyfile (v0.22.0)
+# with PLUGINS_STORE=s3 (plugin assets come from the API) and the SPA served
+# from this image's /srv instead of a separate web container.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+(to_api) {
+	reverse_proxy {$API_UPSTREAM} {
+		# Railway's edge puts the real client in X-Real-IP; the API trusts one hop.
+		header_up X-Forwarded-For {http.request.header.X-Real-IP}
+		header_up X-Forwarded-Port 443
+	}
+}
+
+:{$PORT:8080} {
+	encode gzip
+
+	header {
+		X-Frame-Options "DENY"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		X-XSS-Protection "0"
+		-Server
+	}
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	@notStorage not path /storage/*
+	request_body @notStorage {
+		max_size 10MB
+	}
+
+	# Presigned uploads/downloads: signed for the private RustFS host, so keep that Host.
+	handle_path /storage/* {
+		reverse_proxy {$STORAGE_UPSTREAM} {
+			header_up Host {$STORAGE_UPSTREAM}
+		}
+	}
+
+	handle_path /ws/* {
+		reverse_proxy {$REALTIME_UPSTREAM}
+	}
+
+	handle_path /plugins/* {
+		rewrite * /api/v1/plugin-assets/frontend{path}
+		import to_api
+	}
+	handle_path /plugins-mcp/* {
+		rewrite * /api/v1/plugin-assets/mcp{path}
+		import to_api
+	}
+	handle_path /plugins-skills/* {
+		rewrite * /api/v1/plugin-assets/skills{path}
+		import to_api
+	}
+
+	handle /api/* {
+		import to_api
+	}
+
+	handle /agent-bridge/ws {
+		reverse_proxy {$AGENT_RUNNER_UPSTREAM}
+	}
+	handle /environments/*/terminal/ws {
+		reverse_proxy {$AGENT_RUNNER_UPSTREAM}
+	}
+	handle /environments/*/stats/ws {
+		reverse_proxy {$AGENT_RUNNER_UPSTREAM}
+	}
+
+	handle {
+		root * /srv
+		@assets path /assets/*
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		try_files {path} /index.html
+		file_server
+	}
+}
